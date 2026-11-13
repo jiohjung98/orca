@@ -138,8 +138,10 @@ export function NativeChatNewRowsMarker({
       aria-hidden={shown ? undefined : true}
       // Reduced motion drops the transition, so it goes at once.
       style={look === 'faded' ? { transitionDuration: `${NEW_ROWS_MARKER_FADE_MS}ms` } : undefined}
+      // A full row gap above, a shorter one below (the -mb trims the gap that follows), so the line
+      // reads as evenly spaced between the blocks in either place it draws.
       className={cn(
-        'flex items-center gap-3 text-2xs font-semibold uppercase tracking-[0.05em] text-chat-unread transition-opacity duration-300 ease-out starting:opacity-0 motion-reduce:transition-none',
+        '-mb-1.5 flex items-center gap-3 text-2xs font-semibold uppercase tracking-[0.05em] text-chat-unread transition-opacity duration-300 ease-out starting:opacity-0 motion-reduce:transition-none',
         look === 'measure' && 'invisible',
         look === 'faded' && 'opacity-0'
       )}

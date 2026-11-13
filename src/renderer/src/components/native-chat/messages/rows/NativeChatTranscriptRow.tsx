@@ -113,10 +113,14 @@ export const NativeChatTranscriptRow = memo(function NativeChatTranscriptRow({
     // The negative margin shortens the measured row, which is what moves the next one up.
     // A row that holds its response's actions keeps the gap whole: they stay in flow above the
     // agent's next step (`actionsHang` is unset there), which then sits a full gap below them.
+    // So does a row the "New" line follows, so the line sits the same full gap below any row.
     <div
       className={cn(
         'flex flex-col gap-5',
-        slot.continuesTurn && !(slot.endsResponse && !slot.activeTurnIsWorking) && '-mb-3',
+        slot.continuesTurn &&
+          !(slot.endsResponse && !slot.activeTurnIsWorking) &&
+          !newRowsMarkerBelow &&
+          '-mb-3',
         sectionClassName
       )}
     >
