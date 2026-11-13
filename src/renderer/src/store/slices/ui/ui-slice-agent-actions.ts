@@ -159,10 +159,11 @@ export function createUiAgentActions(
         import('@/lib/agent-session/messaging/terminal/active-agent-note-send-result'),
         import('@/lib/agent-session/messaging/agent-message-send')
       ])
+      const messageTarget = runningAgentMessageTarget(target)
       const sending = sendMessageToAgent({
         worktreeId: mode.worktreeId,
         prompt: mode.prompt,
-        target: runningAgentMessageTarget(target)
+        target: messageTarget
       }).catch(() => {
         console.error('Failed to send notes to sidebar agent target:', {
           code: 'runtime-unverifiable'
@@ -177,10 +178,26 @@ export function createUiAgentActions(
         return current?.id === mode.id && current.instanceId === mode.instanceId
       }
 
+      if (result.status === 'pasted') {
+        // The terminal holds the notes now; sending them again would paste them twice.
+        mode.onPromptDelivered?.()
+        const { showNotePastedToast } =
+          await import('@/components/notes/delivery/note-pasted-toast')
+        showNotePastedToast({
+          worktreeId: mode.worktreeId,
+          target: messageTarget,
+          agentLabel: label,
+          settleMs: result.pasteSettleMs
+        })
+        get().closeAgentSendPopoverTargetMode(mode.id, mode.instanceId)
+        return true
+      }
+
       if (result.status !== 'sent') {
         const message = activeAgentNotesSendFailureMessage(result.status, {
           explicitTarget: true,
-          code: result.code
+          code: result.code,
+          agent: label
         })
         set((s) =>
           s.agentSendPopoverTargetMode?.id === mode.id &&
@@ -195,7 +212,10 @@ export function createUiAgentActions(
               }
             : s
         )
-        const { toast } = await import('sonner')
+        const [{ toast }, { waitingNoteRefusalAction }] = await Promise.all([
+          import('sonner'),
+          import('@/components/notes/delivery/note-pasted-toast')
+        ])
         if (!stillCurrent()) {
           return false
         }
@@ -203,7 +223,10 @@ export function createUiAgentActions(
           translate('auto.store.slices.ui.53883b7bc3', "Couldn't send to {{value0}}", {
             value0: label
           }),
-          { description: message }
+          {
+            description: message,
+            ...waitingNoteRefusalAction(result.code, mode.worktreeId, messageTarget)
+          }
         )
         return false
       }
