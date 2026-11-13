@@ -23,6 +23,8 @@ type PwshSearch = {
   searchedPath: string
   installs: Promise<WindowsPwshInstall[]>
   settled?: WindowsPwshInstall[]
+  /** False when a probe missed its deadline: an empty result is then not a confirmed miss. */
+  complete?: boolean
   missLogged?: boolean
 }
 
@@ -42,22 +44,22 @@ function startPwshSearch(
   const search: PwshSearch = {
     settingKey,
     searchedPath: readPath(env),
-    installs: discoverWindowsPwshInstalls(env)
-  }
-  search.installs = search.installs.then(
-    (installs) => {
-      search.settled = installs
-      return installs
-    },
-    (error: unknown) => {
-      // A failed search must not pin the result; the next spawn searches again.
-      if (pwshSearch === search) {
-        pwshSearch = null
+    installs: discoverWindowsPwshInstalls(env).then(
+      (discovery) => {
+        search.settled = discovery.installs
+        search.complete = discovery.complete
+        return discovery.installs
+      },
+      (error: unknown) => {
+        // A failed search must not pin the result; the next spawn searches again.
+        if (pwshSearch === search) {
+          pwshSearch = null
+        }
+        console.warn('[pty] PowerShell 7 (pwsh.exe) search failed:', error)
+        return []
       }
-      console.warn('[pty] PowerShell 7 (pwsh.exe) search failed:', error)
-      return []
-    }
-  )
+    )
+  }
   return search
 }
 
@@ -84,7 +86,12 @@ export async function findWindowsPwsh(
     search = pwshSearch
     installs = await search.installs
   }
-  if (installs.length === 0 && !search.missLogged) {
+  if (installs.length === 0 && search.complete === false) {
+    // Only an unanswered probe kept this empty; the next terminal searches again.
+    if (pwshSearch === search) {
+      pwshSearch = null
+    }
+  } else if (installs.length === 0 && !search.missLogged) {
     search.missLogged = true
     console.warn(
       '[pty] PowerShell 7 (pwsh.exe) was not found in Program Files, the per-user install folder, PATH, App Paths, the Store install, or user tool folders'

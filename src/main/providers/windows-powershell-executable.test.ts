@@ -175,6 +175,24 @@ describe('PowerShell 7 discovery sources', () => {
     }
   })
 
+  it('searches again once a timed-out only install starts responding', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const settingKey = freshSetting()
+      const env = { ...ENV, Path: '\\\\slow-share\\tools' }
+      install('\\\\slow-share\\tools\\pwsh.exe')
+      machine.unresponsive.add(key('\\\\slow-share\\tools\\pwsh.exe'))
+      const first = findPwsh({ env, settingKey })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(await first).toBe(WINDOWS_POWERSHELL)
+
+      machine.unresponsive.clear()
+      expect(await findPwsh({ env, settingKey })).toBe('\\\\slow-share\\tools\\pwsh.exe')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reads the App Paths registration, machine before user', async () => {
     install('C:\\Program Files\\Custom PS\\pwsh.exe', 'D:\\User PS\\pwsh.exe')
     machine.appPaths = {

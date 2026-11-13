@@ -10,6 +10,9 @@ import {
 
 export type WindowsPwshInstall = { path: string; preview: boolean }
 
+/** `complete` is false when a probe missed the deadline, so an empty result is not a confirmed miss. */
+export type WindowsPwshDiscovery = { installs: WindowsPwshInstall[]; complete: boolean }
+
 type Candidate = { path: string; alias: boolean }
 
 const APP_PATHS_PWSH_KEY = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe'
@@ -193,7 +196,7 @@ async function probeCandidate(candidate: Candidate): Promise<string | null> {
 export async function discoverWindowsPwshInstalls(
   /** The environment the terminal will get; its PATH outranks this process's possibly stale one. */
   terminalEnv: NodeJS.ProcessEnv
-): Promise<WindowsPwshInstall[]> {
+): Promise<WindowsPwshDiscovery> {
   const envs = [terminalEnv, process.env]
   const programFilesRoots = [
     ['ProgramW6432', 'PROGRAMW6432'],
@@ -234,8 +237,9 @@ export async function discoverWindowsPwshInstalls(
   })
   // A PATH entry on an unresponsive share can stall stat; stop waiting rather than hold the tab.
   let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), PROBE_DEADLINE_MS)
+  const timedOut = Symbol('timed-out')
+  const deadline = new Promise<typeof timedOut>((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), PROBE_DEADLINE_MS)
     timer.unref?.()
   })
   const resolved = await Promise.all(
@@ -244,6 +248,9 @@ export async function discoverWindowsPwshInstalls(
   const installs: WindowsPwshInstall[] = []
   const seenInstalls = new Set<string>()
   resolved.forEach((path, index) => {
+    if (path === timedOut) {
+      return
+    }
     const key = path?.toLowerCase()
     if (!path || !key || seenInstalls.has(key)) {
       return
@@ -254,7 +261,7 @@ export async function discoverWindowsPwshInstalls(
       preview: isPreviewPwshPath(path) || isPreviewPwshPath(candidates[index].path)
     })
   })
-  return installs
+  return { installs, complete: !resolved.includes(timedOut) }
 }
 
 /** Stable unless only a preview exists; the reverse when the setting asks for a preview build. */
