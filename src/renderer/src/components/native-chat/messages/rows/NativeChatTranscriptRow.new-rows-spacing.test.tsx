@@ -58,11 +58,14 @@ function slot(overrides: Partial<NativeChatMessageSlot> = {}): NativeChatMessage
   }
 }
 
-function marker(place: NativeChatNewRowsMarkerState['place']): NativeChatNewRowsMarkerState {
+function marker(
+  place: NativeChatNewRowsMarkerState['place'],
+  look: NativeChatNewRowsMarkerState['look'] = 'line'
+): NativeChatNewRowsMarkerState {
   return {
     key: 'reply',
     place,
-    look: 'line',
+    look,
     arriving: false,
     watching: false,
     onArrived: vi.fn(),
@@ -106,8 +109,9 @@ describe('NativeChatTranscriptRow New line spacing', () => {
       )
       const row = rowBox(view)
       const line = view.getByRole('separator')
-      // The row's gap-5 sits on both sides; -mb-1.5 trims the one under the line (20px to 14px at
-      // the default text size; both scale with the chat's spacing).
+      // Above the line: the window's row gap (above-row) or this row's gap-5 (above-turn-bar), 20px
+      // at the default text size. Below it, -mb-1.5 trims the row's gap-5 to 14px. All of them
+      // scale with the chat's spacing.
       expect(row.className).toContain('gap-5')
       expect(line.className.split(' ')).toContain('-mb-1.5')
       const order = [...row.children].map((child) =>
@@ -118,4 +122,19 @@ describe('NativeChatTranscriptRow New line spacing', () => {
       )
     }
   )
+
+  it('keeps the faded line in place at the same size', () => {
+    const view = render(
+      <NativeChatTranscriptRow
+        slot={slot()}
+        context={context}
+        newRowsMarker={marker('above-row', 'faded')}
+      />
+    )
+    // Faded, it is no longer a separator, but it still opens the row with the same trim.
+    expect(view.queryByRole('separator')).toBeNull()
+    const line = rowBox(view).firstElementChild
+    expect(line?.getAttribute('aria-hidden')).toBe('true')
+    expect(line?.className.split(' ')).toEqual(expect.arrayContaining(['-mb-1.5', 'opacity-0']))
+  })
 })
