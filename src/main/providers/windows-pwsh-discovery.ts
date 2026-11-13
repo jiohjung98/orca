@@ -15,6 +15,8 @@ type Candidate = { path: string; alias: boolean }
 const APP_PATHS_PWSH_KEY = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe'
 const VERSION_DIRECTORY = /^(\d+)(-preview)?$/i
 const STORE_PACKAGE_DIRECTORY = /^Microsoft\.PowerShell(Preview)?_/i
+// Local probes finish in milliseconds; this bounds only unreachable network PATH entries.
+const PROBE_DEADLINE_MS = 1_000
 
 /** Store alias reparse stubs may launch through execFile PATH lookup but fail ConPTY absolute CreateProcessW (5). */
 export function isWindowsAppExecutionAliasPath(candidate: string): boolean {
@@ -121,11 +123,19 @@ async function versionedInstallCandidates(roots: (string | undefined)[]): Promis
   return installs.map((install) => toCandidate(install.path))
 }
 
+/** Every PATH spelling in key order: a merged env object can hold both `PATH` and `Path`. */
+export function readWindowsPathValue(env: NodeJS.ProcessEnv): string {
+  return Object.keys(env)
+    .filter((name) => name.toLowerCase() === 'path')
+    .map((name) => env[name])
+    .filter((value): value is string => Boolean(value))
+    .join(pathWin32.delimiter)
+}
+
 function pathDirectoryCandidates(envs: readonly NodeJS.ProcessEnv[]): Candidate[] {
   const candidates: Candidate[] = []
   for (const env of envs) {
-    const pathValue = readWindowsEnv([env], ['PATH', 'Path', 'path'])
-    for (const rawPart of pathValue?.split(pathWin32.delimiter) ?? []) {
+    for (const rawPart of readWindowsPathValue(env).split(pathWin32.delimiter)) {
       const dir = rawPart.trim().replace(/^"|"$/g, '')
       // Relative PATH entries enable repo-local shell hijacking; accept only absolute directories.
       if (pathWin32.isAbsolute(dir)) {
@@ -222,7 +232,15 @@ export async function discoverWindowsPwshInstalls(
     seenCandidates.add(key)
     return true
   })
-  const resolved = await Promise.all(candidates.map((candidate) => probeCandidate(candidate)))
+  // A PATH entry on an unresponsive share can stall stat; stop waiting rather than hold the tab.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), PROBE_DEADLINE_MS)
+    timer.unref?.()
+  })
+  const resolved = await Promise.all(
+    candidates.map((candidate) => Promise.race([probeCandidate(candidate), deadline]))
+  ).finally(() => clearTimeout(timer))
   const installs: WindowsPwshInstall[] = []
   const seenInstalls = new Set<string>()
   resolved.forEach((path, index) => {

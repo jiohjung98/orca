@@ -9,7 +9,13 @@ type SimulatedAppPaths = { machine?: string; user?: string }
 
 const machine = vi.hoisted(() => {
   const appPaths: SimulatedAppPaths = {}
-  return { files: new Map<string, string>(), aliases: new Map<string, string>(), appPaths }
+  return {
+    files: new Map<string, string>(),
+    aliases: new Map<string, string>(),
+    // Paths whose stat never settles, like an unreachable network share.
+    unresponsive: new Set<string>(),
+    appPaths
+  }
 })
 
 function key(path: string): string {
@@ -22,6 +28,9 @@ function enoent(path: string): Error {
 
 vi.mock('node:fs/promises', () => ({
   stat: async (path: string) => {
+    if (machine.unresponsive.has(key(path))) {
+      return new Promise(() => {})
+    }
     if (!machine.files.has(key(path))) {
       throw enoent(path)
     }
@@ -112,6 +121,7 @@ async function findPwsh(
 beforeEach(() => {
   machine.files.clear()
   machine.aliases.clear()
+  machine.unresponsive.clear()
   machine.appPaths = {}
   install(WINDOWS_POWERSHELL, CMD)
   // This process's own PATH is the stale one; tests put fresh entries on the terminal env.
@@ -144,6 +154,25 @@ describe('PowerShell 7 discovery sources', () => {
     install('D:\\Tools\\pwsh\\pwsh.exe')
     const env = { ...ENV, Path: 'relative-tools;"D:\\Tools\\pwsh";C:\\Windows\\System32' }
     expect(await findPwsh({ env })).toBe('D:\\Tools\\pwsh\\pwsh.exe')
+  })
+
+  it('reads both PATH spellings when a merged env carries PATH and Path', async () => {
+    install('D:\\Second\\pwsh.exe')
+    const env = { ...ENV, PATH: 'C:\\Windows\\System32', Path: 'D:\\Second' }
+    expect(await findPwsh({ env })).toBe('D:\\Second\\pwsh.exe')
+  })
+
+  it('stops waiting on an unresponsive PATH entry and uses the install it found', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      install('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+      machine.unresponsive.add(key('\\\\slow-share\\tools\\pwsh.exe'))
+      const found = findPwsh({ env: { ...ENV, Path: '\\\\slow-share\\tools' } })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(await found).toBe('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reads the App Paths registration, machine before user', async () => {

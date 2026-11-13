@@ -3,6 +3,7 @@ import {
   discoverWindowsPwshInstalls,
   isRealWindowsExecutable,
   readWindowsEnv,
+  readWindowsPathValue,
   selectWindowsPwsh,
   type WindowsPwshInstall
 } from './windows-pwsh-discovery'
@@ -30,7 +31,7 @@ let pwshSearch: PwshSearch | null = null
 let windowsPowerShellFound: string | null = null
 
 function readPath(env: NodeJS.ProcessEnv): string {
-  return readWindowsEnv([env], ['PATH', 'Path', 'path']) ?? ''
+  return readWindowsPathValue(env)
 }
 
 function startPwshSearch(
