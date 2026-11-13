@@ -1,91 +1,301 @@
-import { describe, expect, it } from 'vitest'
-import {
-  resolveWindowsPowerShellExecutablePath,
-  resolveWindowsPowerShellSpawnChain
-} from './windows-powershell-executable'
+import { win32 as pathWin32 } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resolveWindowsPowerShellSpawnChain } from './windows-powershell-executable'
+import { forgetWindowsPowerShellAfterLaunchFailure } from './windows-powershell-search'
+import { buildWindowsPowerShellSpawnAttempts } from './windows-shell-fallback-chain'
 
-const WIN_ENV: NodeJS.ProcessEnv = {
-  ProgramW6432: 'C:\\Program Files',
-  'ProgramFiles(x86)': 'C:\\Program Files (x86)',
-  LOCALAPPDATA: 'C:\\Users\\dev\\AppData\\Local',
-  SystemRoot: 'C:\\Windows',
-  ComSpec: 'C:\\Windows\\System32\\cmd.exe'
-}
+// A simulated machine: real installs are never touched.
+type SimulatedAppPaths = { machine?: string; user?: string }
 
-const PATH_PWSH7 = 'D:\\Tools\\PowerShell\\7\\pwsh.exe'
-const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-// Store alias reparse points fail ConPTY CreateProcessW with access-denied (5).
-const PWSH_STORE_ALIAS = 'C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe'
-const PWSH_STORE_EXE =
-  'C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.3.0_x64__8wekyb3d8bbwe\\pwsh.exe'
-
-describe('resolveWindowsPowerShellExecutablePath', () => {
-  it('repro: resolves pwsh.exe from a real PATH entry when standard roots miss', () => {
-    expect(
-      resolveWindowsPowerShellExecutablePath('pwsh.exe', {
-        platform: 'win32',
-        env: {
-          ...WIN_ENV,
-          Path: [
-            'relative-tools',
-            'C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps',
-            'D:\\Tools\\PowerShell\\7'
-          ].join(';')
-        },
-        isRealExecutable: (p) => p === PATH_PWSH7
-      })
-    ).toBe(PATH_PWSH7)
-  })
-
-  it('repro: never resolves pwsh.exe to the Store App Execution Alias stub', () => {
-    // Alias existence cannot prove a ConPTY-launchable executable.
-    const resolved = resolveWindowsPowerShellExecutablePath('pwsh.exe', {
-      platform: 'win32',
-      env: WIN_ENV,
-      isRealExecutable: (p) => p === PWSH_STORE_ALIAS
-    })
-    expect(resolved).toBeNull()
-    expect(resolved).not.toBe(PWSH_STORE_ALIAS)
-  })
-
-  it('repro: resolves a Store App Execution Alias to its real package executable', () => {
-    const resolved = resolveWindowsPowerShellExecutablePath('pwsh.exe', {
-      platform: 'win32',
-      env: {
-        ...WIN_ENV,
-        Path: 'C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps'
-      },
-      isRealExecutable: (p) => p === PWSH_STORE_EXE,
-      resolveAppExecutionAlias: (p) => (p === PWSH_STORE_ALIAS ? PWSH_STORE_EXE : null)
-    })
-    expect(resolved).toBe(PWSH_STORE_EXE)
-  })
-
-  it.each(['pwsh.exe', PWSH_STORE_ALIAS, 'C:\\Tools\\powershell.exe'])(
-    'rejects unsafe Store alias target %s',
-    (target) => {
-      const resolved = resolveWindowsPowerShellExecutablePath('pwsh.exe', {
-        platform: 'win32',
-        env: {
-          ...WIN_ENV,
-          Path: 'C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps'
-        },
-        isRealExecutable: (p) => p === target,
-        resolveAppExecutionAlias: (p) => (p === PWSH_STORE_ALIAS ? target : null)
-      })
-      expect(resolved).toBeNull()
-    }
-  )
+const machine = vi.hoisted(() => {
+  const appPaths: SimulatedAppPaths = {}
+  return { files: new Map<string, string>(), aliases: new Map<string, string>(), appPaths }
 })
 
-describe('resolveWindowsPowerShellSpawnChain', () => {
-  it('falls back to Windows PowerShell + cmd.exe when pwsh is only a Store alias', () => {
-    const chain = resolveWindowsPowerShellSpawnChain('pwsh.exe', {
-      platform: 'win32',
-      env: WIN_ENV,
-      isRealExecutable: (p) => p === PWSH_STORE_ALIAS || p === WINDOWS_POWERSHELL
+function key(path: string): string {
+  return pathWin32.normalize(path).toLowerCase()
+}
+
+function enoent(path: string): Error {
+  return Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
+}
+
+vi.mock('node:fs/promises', () => ({
+  stat: async (path: string) => {
+    if (!machine.files.has(key(path))) {
+      throw enoent(path)
+    }
+    return { isFile: () => true, size: 4096 }
+  },
+  readlink: async (path: string) => {
+    const target = machine.aliases.get(key(path))
+    if (!target) {
+      throw enoent(path)
+    }
+    return target
+  },
+  readdir: async (dir: string) => {
+    const prefix = `${key(dir)}\\`
+    const names = new Set<string>()
+    for (const original of [...machine.files.values(), ...machine.aliases.keys()]) {
+      const normalized = pathWin32.normalize(original)
+      if (normalized.toLowerCase().startsWith(prefix)) {
+        names.add(normalized.slice(prefix.length).split('\\')[0])
+      }
+    }
+    if (names.size === 0) {
+      throw enoent(dir)
+    }
+    return [...names]
+  }
+}))
+
+vi.mock('../windows/windows-native-registry', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  loadWindowsNativeRegistry: () => ({
+    HK: { CU: 1, LM: 2 },
+    getRegistryKey: (root: number) => {
+      const value = root === 2 ? machine.appPaths.machine : machine.appPaths.user
+      return value === undefined ? null : { '': { name: '', type: 2, value } }
+    }
+  })
+}))
+
+const ENV: NodeJS.ProcessEnv = {
+  ProgramW6432: 'C:\\Program Files',
+  ProgramFiles: 'C:\\Program Files',
+  'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+  LOCALAPPDATA: 'C:\\Users\\dev\\AppData\\Local',
+  USERPROFILE: 'C:\\Users\\dev',
+  SystemRoot: 'C:\\Windows',
+  ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+  Path: 'C:\\Windows\\System32'
+}
+const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+const CMD = 'C:\\Windows\\System32\\cmd.exe'
+const WINDOWS_APPS = 'C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps'
+const STORE_EXE =
+  'C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.3.0_x64__8wekyb3d8bbwe\\pwsh.exe'
+
+function install(...paths: string[]): void {
+  for (const path of paths) {
+    machine.files.set(key(path), path)
+  }
+}
+
+function uninstall(path: string): void {
+  machine.files.delete(key(path))
+}
+
+function alias(path: string, target: string): void {
+  machine.aliases.set(key(path), target)
+}
+
+let searchId = 0
+// Each test gets its own setting so one test's cached search never answers another's.
+function freshSetting(): string {
+  searchId += 1
+  return `pwsh.exe|test-${searchId}`
+}
+
+async function findPwsh(
+  options: { env?: NodeJS.ProcessEnv; settingKey?: string } = {}
+): Promise<string> {
+  const chain = await resolveWindowsPowerShellSpawnChain('pwsh.exe', {
+    platform: 'win32',
+    env: options.env ?? ENV,
+    settingKey: options.settingKey ?? freshSetting()
+  })
+  return chain[0]
+}
+
+beforeEach(() => {
+  machine.files.clear()
+  machine.aliases.clear()
+  machine.appPaths = {}
+  install(WINDOWS_POWERSHELL, CMD)
+  // This process's own PATH is the stale one; tests put fresh entries on the terminal env.
+  vi.stubEnv('PATH', 'C:\\Windows\\System32')
+  vi.stubEnv('Path', 'C:\\Windows\\System32')
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
+describe('PowerShell 7 discovery sources', () => {
+  it('picks the highest Program Files version across 64-bit and 32-bit roots', async () => {
+    install(
+      'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      'C:\\Program Files (x86)\\PowerShell\\6\\pwsh.exe',
+      'C:\\Program Files (x86)\\PowerShell\\8\\pwsh.exe'
+    )
+    expect(await findPwsh()).toBe('C:\\Program Files (x86)\\PowerShell\\8\\pwsh.exe')
+  })
+
+  it('finds a per-user install', async () => {
+    install('C:\\Users\\dev\\AppData\\Local\\Microsoft\\PowerShell\\7\\pwsh.exe')
+    expect(await findPwsh()).toBe(
+      'C:\\Users\\dev\\AppData\\Local\\Microsoft\\PowerShell\\7\\pwsh.exe'
+    )
+  })
+
+  it('finds pwsh on the terminal PATH when this process PATH is stale', async () => {
+    install('D:\\Tools\\pwsh\\pwsh.exe')
+    const env = { ...ENV, Path: 'relative-tools;"D:\\Tools\\pwsh";C:\\Windows\\System32' }
+    expect(await findPwsh({ env })).toBe('D:\\Tools\\pwsh\\pwsh.exe')
+  })
+
+  it('reads the App Paths registration, machine before user', async () => {
+    install('C:\\Program Files\\Custom PS\\pwsh.exe', 'D:\\User PS\\pwsh.exe')
+    machine.appPaths = {
+      machine: '"%ProgramFiles%\\Custom PS\\pwsh.exe"',
+      user: 'D:\\User PS\\pwsh.exe'
+    }
+    expect(await findPwsh()).toBe('C:\\Program Files\\Custom PS\\pwsh.exe')
+  })
+
+  it('resolves the Store install when WindowsApps is not on PATH', async () => {
+    install(STORE_EXE)
+    alias(`${WINDOWS_APPS}\\Microsoft.PowerShell_8wekyb3d8bbwe\\pwsh.exe`, STORE_EXE)
+    expect(await findPwsh()).toBe(STORE_EXE)
+  })
+
+  it.each([
+    'C:\\Users\\dev\\.dotnet\\tools\\pwsh.exe',
+    'C:\\Users\\dev\\scoop\\apps\\pwsh\\current\\pwsh.exe'
+  ])('finds the user tool install %s', async (path) => {
+    install(path)
+    expect(await findPwsh()).toBe(path)
+  })
+
+  it('never launches the zero-byte Store alias itself', async () => {
+    install(`${WINDOWS_APPS}\\pwsh.exe`)
+    expect(await findPwsh()).toBe(WINDOWS_POWERSHELL)
+  })
+
+  it.each(['pwsh.exe', `${WINDOWS_APPS}\\pwsh.exe`, 'C:\\Tools\\powershell.exe'])(
+    'rejects unsafe Store alias target %s',
+    async (target) => {
+      install(target)
+      alias(`${WINDOWS_APPS}\\pwsh.exe`, target)
+      expect(await findPwsh()).toBe(WINDOWS_POWERSHELL)
+    }
+  )
+
+  it('uses a preview build only when no stable build exists', async () => {
+    const preview = 'C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe'
+    install(preview)
+    expect(await findPwsh()).toBe(preview)
+
+    install('C:\\Users\\dev\\.dotnet\\tools\\pwsh.exe')
+    expect(await findPwsh()).toBe('C:\\Users\\dev\\.dotnet\\tools\\pwsh.exe')
+  })
+})
+
+describe('PowerShell 7 search cache', () => {
+  const programFilesPwsh = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+  const perUserPwsh = 'C:\\Users\\dev\\AppData\\Local\\Microsoft\\PowerShell\\7\\pwsh.exe'
+
+  it('reuses the found path until the shell setting changes', async () => {
+    const settingKey = freshSetting()
+    install(programFilesPwsh)
+    expect(await findPwsh({ settingKey })).toBe(programFilesPwsh)
+
+    uninstall(programFilesPwsh)
+    install(perUserPwsh)
+    expect(await findPwsh({ settingKey })).toBe(programFilesPwsh)
+    expect(await findPwsh({ settingKey: freshSetting() })).toBe(perUserPwsh)
+  })
+
+  it('searches again after the cached path fails to launch', async () => {
+    const settingKey = freshSetting()
+    install(programFilesPwsh)
+    expect(await findPwsh({ settingKey })).toBe(programFilesPwsh)
+
+    uninstall(programFilesPwsh)
+    install(perUserPwsh)
+    forgetWindowsPowerShellAfterLaunchFailure(programFilesPwsh)
+    expect(await findPwsh({ settingKey })).toBe(perUserPwsh)
+  })
+
+  it('keeps a miss for the same PATH but searches again once the terminal PATH changes', async () => {
+    const settingKey = freshSetting()
+    expect(await findPwsh({ settingKey })).toBe(WINDOWS_POWERSHELL)
+
+    install('D:\\New\\pwsh.exe')
+    expect(await findPwsh({ settingKey })).toBe(WINDOWS_POWERSHELL)
+    const env = { ...ENV, Path: `${ENV.Path};D:\\New` }
+    expect(await findPwsh({ settingKey, env })).toBe('D:\\New\\pwsh.exe')
+  })
+})
+
+describe('PowerShell 7 search warm-up', () => {
+  it('lets the first terminal find pwsh on its PATH after a warm-up saw a stale PATH', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+    try {
+      vi.resetModules()
+      const search = await import('./windows-powershell-search')
+      install('D:\\Fresh\\pwsh.exe')
+      search.warmWindowsPwshSearch()
+      const env = { ...ENV, Path: 'D:\\Fresh;C:\\Windows\\System32' }
+      expect(await search.findWindowsPwsh({ env, settingKey: 'powershell.exe|pwsh.exe' })).toBe(
+        'D:\\Fresh\\pwsh.exe'
+      )
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
+  })
+})
+
+describe('PowerShell 7 spawn attempts', () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+
+  beforeEach(() => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', originalPlatform)
+  })
+
+  function attempts(requestedShell: string, implementation: string) {
+    return buildWindowsPowerShellSpawnAttempts({
+      shellPath: 'pwsh.exe',
+      cwd: 'C:\\repo',
+      defaultCwd: 'C:\\repo',
+      env: ENV,
+      requestedShell,
+      powerShellImplementation: implementation
     })
-    expect(chain).toEqual([WINDOWS_POWERSHELL, WIN_ENV.ComSpec])
-    expect(chain).not.toContain(PWSH_STORE_ALIAS)
+  }
+
+  // The fallback shell prints the notice itself, so it rides ConPTY like any other output.
+  function startupScript(attempt: { shellPath: string; shellArgs: string[] }): string {
+    return attempt.shellPath === CMD
+      ? attempt.shellArgs[1]
+      : Buffer.from(attempt.shellArgs[3], 'base64').toString('utf16le')
+  }
+
+  it('has each fallback shell announce that PowerShell 7 was not found', async () => {
+    const plan = await attempts('powershell.exe', `missing-${freshSetting()}`)
+    expect(plan.map((attempt) => attempt.shellPath)).toEqual([WINDOWS_POWERSHELL, CMD])
+    expect(startupScript(plan[0])).toMatch(/^Write-Host '\[Orca .*\]' -ForegroundColor Yellow\n/)
+    expect(startupScript(plan[1])).toMatch(/ & echo \[Orca .*\]$/)
+  })
+
+  it('opens PowerShell 7 without a notice when it is found', async () => {
+    install('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+    const plan = await attempts('powershell.exe', `found-${freshSetting()}`)
+    expect(plan[0].shellPath).toBe('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+    expect(plan.map(startupScript).join('\n')).not.toContain('[Orca')
+  })
+
+  it('prefers a preview build when the shell setting points at one', async () => {
+    const preview = 'C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe'
+    install('C:\\Program Files\\PowerShell\\7\\pwsh.exe', preview)
+    const plan = await attempts(preview, `preview-${freshSetting()}`)
+    expect(plan[0].shellPath).toBe(preview)
   })
 })
