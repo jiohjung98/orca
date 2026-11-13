@@ -106,7 +106,8 @@ describe('NativeChatTranscriptRow New line spacing', () => {
       )
       const row = rowBox(view)
       const line = view.getByRole('separator')
-      // The row's gap-5 sits on both sides; -mb-1.5 takes 20px under the line down to 14px.
+      // The row's gap-5 sits on both sides; -mb-1.5 trims the one under the line (20px to 14px at
+      // the default text size; both scale with the chat's spacing).
       expect(row.className).toContain('gap-5')
       expect(line.className.split(' ')).toContain('-mb-1.5')
       const order = [...row.children].map((child) =>
