@@ -56,16 +56,22 @@ function startArgs(repoId: string, repoPath: string) {
   }
 }
 
-function field(value: unknown, key: string): string & Record<string, unknown> {
-  const found: unknown =
-    typeof value === 'object' && value !== null && key in value
-      ? Reflect.get(value, key)
-      : undefined
-  if (found === undefined) {
-    throw new Error(`missing ${key}`)
+function ticketIdOf(snapshot: unknown): string {
+  if (typeof snapshot === 'object' && snapshot !== null && 'ticketId' in snapshot) {
+    return String(snapshot.ticketId)
   }
-  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: reads either a string id/token or a nested snapshot object by key.
-  return found as string & Record<string, unknown>
+  throw new Error('missing ticketId')
+}
+
+function prepareTokenOf(snapshot: unknown): string {
+  const preparation =
+    typeof snapshot === 'object' && snapshot !== null && 'preparation' in snapshot
+      ? snapshot.preparation
+      : null
+  if (typeof preparation === 'object' && preparation !== null && 'token' in preparation) {
+    return String(preparation.token)
+  }
+  throw new Error('missing preparation token')
 }
 
 async function register(): Promise<(channel: string, args: unknown) => Promise<unknown>> {
@@ -103,12 +109,12 @@ describe('native PR detail recovery handlers', () => {
     })
 
     const started = await invoke('gh:startPRDetailRecovery', startArgs('repo-1', '/repo'))
-    const ticketId = field(started, 'ticketId')
+    const ticketId = ticketIdOf(started)
     await vi.advanceTimersByTimeAsync(0)
     const prepared = await invoke('gh:waitPRDetailRecovery', { ticketId, afterRevision: 0 })
     await invoke('gh:commitPRDetailRecovery', {
       ticketId,
-      prepareToken: field(field(prepared, 'preparation'), 'token'),
+      prepareToken: prepareTokenOf(prepared),
       publicationGrantId: 'grant-1'
     })
     await vi.advanceTimersByTimeAsync(0)
