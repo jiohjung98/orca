@@ -49,12 +49,14 @@ describe('getChecksPanelReviewState — precedence', () => {
     const state = getChecksPanelReviewState(
       input({
         reviewLookup: 'positive_unresolved',
+        reviewNumber: 7,
         openReviewUrl: 'https://x/pull/7',
         eligibilityBlockedReason: 'no_upstream',
         hasUpstream: false
       })
     )
     expect(state.title).toBe('No upstream configured')
+    expect(state.description).toBe('Push to update PR #7.')
     expect(state.workflowAction).toBe('publish_branch')
     expect(state.composerMode).toBe('hidden')
     expect(state.recovery).toContain('open_review')

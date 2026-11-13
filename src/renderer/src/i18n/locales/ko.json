@@ -12866,7 +12866,6 @@
             "495b2f8c4b": "agent를 시작했지만 선택한 댓글을 해결하거나 답글할 수 없습니다.",
             "review": {
               "auto_retry": "Orca가 {{time}}에 다시 시도합니다.",
-              "open_review": "검토 열기",
               "retry": "다시 시도"
             },
             "sync": {
@@ -20954,6 +20953,25 @@
       "title": "PR 연결 해제됨",
       "description": "이 워크스페이스에서는 PR #{{number}}이(가) 숨겨져 있습니다. 검사와 리뷰 세부정보를 복원하려면 다시 연결하세요.",
       "relink": "링크 PR #{{number}}"
+    },
+    "positiveReview": {
+      "status": {
+        "failed": "세부 정보를 불러오지 못했습니다",
+        "queued": "세부 정보 로드 대기 중",
+        "rateGate": "{{provider}} 한도에 도달했습니다. {{time}}에 불러옵니다.",
+        "loading": "세부 정보 불러오는 중…",
+        "timeout": "{{provider}}에서 응답하지 않았습니다",
+        "unusable": "여기에서는 세부 정보를 표시할 수 없습니다",
+        "notLoaded": "세부 정보를 불러오지 않음",
+        "retryGate": "{{provider}} 한도에 도달했습니다. {{time}}에 다시 시도하세요."
+      },
+      "title": "{{shortLabel}} #{{number}}",
+      "titleNoNumber": "{{shortLabel}} 찾음",
+      "open": "{{shortLabel}} 열기",
+      "openAria": "{{provider}}에서 {{shortLabel}} #{{number}} 열기",
+      "openAriaNoNumber": "{{provider}}에서 {{shortLabel}} 열기",
+      "pushToUpdate": "푸시하여 {{shortLabel}} #{{number}}을(를) 업데이트하세요.",
+      "pushToUpdateNoNumber": "푸시하여 이 {{shortLabel}}을(를) 업데이트하세요."
     }
   },
   "sourceControl": {

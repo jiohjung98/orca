@@ -255,4 +255,82 @@ describe('PR detail recovery tickets', () => {
       kind: 'expired'
     })
   })
+
+  it('wakes promptly after a host-only direct predecessor settles, honouring its cooldown', async () => {
+    const api = await load()
+    const direct = deferred<PRRefreshOutcome>()
+    getPRForBranchOutcomeMock.mockReturnValueOnce(direct.promise)
+    const directRead = api.refreshPRNow(H1, 'manual')
+    await vi.advanceTimersByTimeAsync(0)
+    const started = api.startPRDetailRecovery(CALLER, startArgs(1), H2)
+    expect(started.phase).toBe('waiting-existing')
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    direct.resolve(noPR())
+    await directRead
+    await vi.advanceTimersByTimeAsync(5_000)
+    // The direct read's cooldown is a future gate, not a reason to wait for the lease tick.
+    expect((await api.snapshot(started.ticketId)).phase).toBe('paused')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect((await api.snapshot(started.ticketId)).phase).toBe('preparing')
+  })
+
+  it('prepares as soon as a hosted direct predecessor settles', async () => {
+    const api = await load()
+    const hosted = deferred<PRRefreshOutcome>()
+    const hostedRead = api.runHostedPRRead(H1, () => hosted.promise)
+    const started = api.startPRDetailRecovery(CALLER, startArgs(1), H2)
+    expect(started.phase).toBe('waiting-existing')
+    hosted.resolve(noPR())
+    await hostedRead
+    await vi.advanceTimersByTimeAsync(0)
+    expect((await api.snapshot(started.ticketId)).phase).toBe('preparing')
+  })
+
+  it('retains no epoch state for refusals and reclaims accepted epochs after their window', async () => {
+    const api = await load()
+    for (let index = 0; index < 5_000; index += 1) {
+      api.startPRDetailRecovery(
+        { callerKey: `ipc:${index % 7}` },
+        { ...startArgs(index), clientEpoch: { scope: `scope-${index}`, counter: index } },
+        'validation'
+      )
+    }
+    expect(api._getPRDetailRecoveryRetentionForTests()).toEqual({ tickets: 0, watermarks: 0 })
+
+    const started = api.startPRDetailRecovery(CALLER, startArgs(5), H2)
+    api.cancelPRDetailRecovery(CALLER.callerKey, started.ticketId)
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(api._getPRDetailRecoveryRetentionForTests()).toEqual({ tickets: 0, watermarks: 1 })
+    // Inside the replay window an old epoch still cannot be recreated.
+    expect(api.startPRDetailRecovery(CALLER, startArgs(5), H2).terminal).toEqual({
+      kind: 'expired'
+    })
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(api._getPRDetailRecoveryRetentionForTests()).toEqual({ tickets: 0, watermarks: 0 })
+  })
+
+  it('bounds live scopes per caller and drops everything when the caller goes away', async () => {
+    const api = await load()
+    const scoped = (scope: string) => ({ ...startArgs(1), clientEpoch: { scope, counter: 1 } })
+    for (let index = 0; index < 8; index += 1) {
+      expect(api.startPRDetailRecovery(CALLER, scoped(`s${index}`), H2).terminal).toBeUndefined()
+    }
+    expect(api.startPRDetailRecovery(CALLER, scoped('s8'), H2).terminal).toEqual({
+      kind: 'not-admitted',
+      reason: 'capacity'
+    })
+    expect(
+      api.startPRDetailRecovery(
+        CALLER,
+        { ...scoped('x'), clientEpoch: { scope: 'x'.repeat(129), counter: 1 } },
+        H2
+      ).terminal
+    ).toEqual({ kind: 'not-admitted', reason: 'validation' })
+
+    api.cancelPRDetailRecoveryCaller(CALLER.callerKey)
+    expect(api._getPRDetailRecoveryRetentionForTests()).toEqual({ tickets: 0, watermarks: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getPRForBranchOutcomeMock).not.toHaveBeenCalled()
+  })
 })

@@ -15,6 +15,7 @@ export type ChecksPanelEmptyContentModel = Pick<
   | 'linkedPR'
   | 'linkedReviewNumber'
   | 'cachedPRNumber'
+  | 'prCacheKey'
   | 'prRefreshState'
   | 'suppressedGitHubPR'
 > &
@@ -87,4 +88,7 @@ export type ChecksPanelEmptyContentModel = Pick<
   Pick<ChecksPanelCreateReviewState, 'handleCreatePullRequest'> &
   Pick<ChecksPanelBranchActionsState, 'handlePublishBranch' | 'handleSyncBranch'> &
   Pick<ChecksPanelRefreshState, 'handleRefresh' | 'manualRefreshError'> &
-  Pick<ChecksPanelCheckAndReviewActionsState, 'handleLinkSuppressedPullRequest'>
+  Pick<ChecksPanelCheckAndReviewActionsState, 'handleLinkSuppressedPullRequest'> & {
+    /** The context the visible panel asked the store to recover; null when none qualifies. */
+    prDetailRecoveryContextKey: string | null
+  }

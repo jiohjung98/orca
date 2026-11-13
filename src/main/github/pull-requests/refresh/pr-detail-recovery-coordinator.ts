@@ -130,3 +130,7 @@ export function cancelPRDetailRecovery(
 export function cancelPRDetailRecoveryCaller(callerKey: string): void {
   tickets.cancelCaller(callerKey)
 }
+
+export function _getPRDetailRecoveryRetentionForTests(): { tickets: number; watermarks: number } {
+  return tickets.retainedCounts()
+}

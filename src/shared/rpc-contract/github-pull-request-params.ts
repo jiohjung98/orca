@@ -98,8 +98,9 @@ const PRDetailRecoveryIdentityParams = z.object({
 
 export const PRDetailRecoveryStart = z.object({
   clientEpoch: z.object({
-    scope: requiredString('Missing epoch scope'),
-    counter: z.number().int().nonnegative()
+    // Bounded before the host allocates anything for it.
+    scope: z.string().min(1, 'Missing epoch scope').max(128),
+    counter: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
   }),
   identity: PRDetailRecoveryIdentityParams,
   cacheKey: z.string()

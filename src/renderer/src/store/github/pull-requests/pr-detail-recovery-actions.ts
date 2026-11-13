@@ -2,9 +2,11 @@ import type { StateCreator } from 'zustand'
 import { createNonSecureContextUuid } from '../../../../../shared/non-secure-context-uuid'
 import type { AppState } from '../../types'
 import type { PRDetailRecoverySnapshot } from '../../../../../shared/github/pull-requests/refresh/pr-detail-recovery-contract'
-import { inflightPRRequests, prLookupIntentRevision } from '../requests/request-coordination'
-import { getRuntimeRepoTarget } from '../repositories/repository-routing'
-import { getGitHubSourceTarget } from '../work-items/work-item-routing'
+import {
+  inflightPRRequests,
+  onPRLookupIntent,
+  prLookupIntentRevision
+} from '../requests/request-coordination'
 import {
   hasUsableGitHubPR,
   prDetailRecoveryContextKey,
@@ -23,6 +25,9 @@ import {
 import { resolvePRDetailRecoveryTransport } from './pr-detail-recovery-transport'
 import {
   awaitWithBudget,
+  recoveryRuntimeTarget,
+  retainedEpochs,
+  startWithResume,
   buildPRDetailRecoveryIdentity,
   terminalRecoveryStatus,
   type PRDetailRecoverySubscription as Subscription
@@ -38,20 +43,38 @@ export type PRDetailRecoverySlice = {
   reconcileGitHubPRDetails: (context: PRDetailRecoveryContext | null) => void
   /** Manual Retry owns the next read; detach this panel's automatic ticket first. */
   cancelGitHubPRDetailRecovery: () => void
+  /** A settled Retry that left no usable PR reports its own outcome, announced once. */
+  settleGitHubPRDetailRetry: (contextKey: string, status: PRDetailRecoveryStatus) => void
 }
 
 const EPOCH_SCOPE = `checks:${createNonSecureContextUuid()}`
-const MAX_RETAINED_EPOCHS = 32
 let epochCounter = 0
 let panelVisible = false
 let current: Subscription | null = null
-// Epochs closed in this exposure; rendering the same context again shows them instead of re-arming.
-const consumed = new Map<string, PRDetailRecoveryStatus>()
+
+// A newer local direct lookup is new intent even before its host registration arrives.
+onPRLookupIntent((cacheKey) => {
+  const sub = current
+  if (sub && !sub.cancelled && sub.owner.cacheKey === cacheKey && !sub.admitted) {
+    sub.yieldToNewerIntent()
+  }
+})
 
 export const createPRDetailRecoveryActions = (
   set: SetState,
   get: GetState
 ): PRDetailRecoverySlice => {
+  const record = (contextKey: string, status: PRDetailRecoveryStatus, bump: number): void => {
+    retainedEpochs.set(contextKey, status)
+    set((s) => ({
+      prDetailRecovery: {
+        contextKey,
+        status,
+        terminalCount: (s.prDetailRecovery?.terminalCount ?? 0) + bump
+      }
+    }))
+  }
+
   const live = (sub: Subscription): boolean =>
     current === sub && !sub.cancelled && prDetailRecoveryContextLive(get(), sub.context, sub.owner)
 
@@ -60,19 +83,14 @@ export const createPRDetailRecoveryActions = (
       return
     }
     if (terminal) {
-      consumed.set(sub.contextKey, status)
-      for (const oldest of consumed.keys()) {
-        if (consumed.size <= MAX_RETAINED_EPOCHS) {
-          break
-        }
-        consumed.delete(oldest)
-      }
+      record(sub.contextKey, status, 1)
+      return
     }
     set((s) => ({
       prDetailRecovery: {
         contextKey: sub.contextKey,
         status,
-        terminalCount: (s.prDetailRecovery?.terminalCount ?? 0) + (terminal ? 1 : 0)
+        terminalCount: s.prDetailRecovery?.terminalCount ?? 0
       }
     }))
   }
@@ -99,11 +117,7 @@ export const createPRDetailRecoveryActions = (
         return
       }
       releasePRDetailRecoveryGrant(sub.owner, sub.grant)
-      const runtime = getRuntimeRepoTarget(
-        get(),
-        { repoId: sub.context.repoId, repoPath: sub.context.repoPath },
-        getGitHubSourceTarget(get(), sub.owner.repo)
-      )
+      const runtime = recoveryRuntimeTarget(get(), sub)
       sub.grant = capturePRDetailRecoveryGrant(
         get,
         sub.context,
@@ -157,6 +171,7 @@ export const createPRDetailRecoveryActions = (
       if (latest.phase === 'paused' && latest.notBefore !== undefined) {
         show(sub, { kind: 'paused', notBefore: latest.notBefore })
       } else {
+        sub.admitted = latest.admitted
         show(sub, latest.admitted ? { kind: 'admitted' } : { kind: 'waiting' })
       }
       if (latest.phase === 'preparing' && !latest.publicationGrantId) {
@@ -175,11 +190,7 @@ export const createPRDetailRecoveryActions = (
   }
 
   const run = async (sub: Subscription): Promise<void> => {
-    const runtime = getRuntimeRepoTarget(
-      get(),
-      { repoId: sub.context.repoId, repoPath: sub.context.repoPath },
-      getGitHubSourceTarget(get(), sub.owner.repo)
-    )
+    const runtime = recoveryRuntimeTarget(get(), sub)
     sub.transport = await resolvePRDetailRecoveryTransport(runtime?.target.environmentId ?? null)
     if (current !== sub || sub.cancelled) {
       return
@@ -207,13 +218,17 @@ export const createPRDetailRecoveryActions = (
     sub.intentRevision = prLookupIntentRevision(sub.owner.cacheKey)
     const identity = buildPRDetailRecoveryIdentity(sub, sub.transport, runtime?.repo ?? null)
     epochCounter += 1
-    const snapshot = await sub.transport
-      .start({
-        clientEpoch: { scope: EPOCH_SCOPE, counter: epochCounter },
-        identity,
-        cacheKey: sub.owner.cacheKey
-      })
-      .catch(() => null)
+    const startArgs = {
+      clientEpoch: { scope: EPOCH_SCOPE, counter: epochCounter },
+      identity,
+      cacheKey: sub.owner.cacheKey
+    }
+    const transport = sub.transport
+    // A lost reply may hide an accepted start: resend the same epoch (host-idempotent), boundedly.
+    const snapshot = await startWithResume(
+      () => transport.start(startArgs),
+      () => current === sub && !sub.cancelled && live(sub)
+    )
     if (current !== sub || sub.cancelled) {
       if (snapshot?.ticketId) {
         void sub.transport.cancel(snapshot.ticketId).catch(() => {})
@@ -233,7 +248,7 @@ export const createPRDetailRecoveryActions = (
 
     notePRDetailRecoveryPanelVisible: (visible) => {
       if (visible && !panelVisible) {
-        consumed.clear()
+        retainedEpochs.clear()
       }
       panelVisible = visible
       if (!visible) {
@@ -257,7 +272,7 @@ export const createPRDetailRecoveryActions = (
         }
         return
       }
-      const retained = consumed.get(contextKey)
+      const retained = retainedEpochs.get(contextKey)
       if (retained) {
         if (get().prDetailRecovery?.contextKey !== contextKey) {
           set({ prDetailRecovery: { contextKey, status: retained, terminalCount: 0 } })
@@ -272,7 +287,12 @@ export const createPRDetailRecoveryActions = (
         transport: null,
         ticketId: null,
         grant: null,
-        intentRevision: 0
+        intentRevision: 0,
+        admitted: false,
+        yieldToNewerIntent: () => {
+          detach(sub)
+          show(sub, { kind: 'closed' }, true)
+        }
       }
       current = sub
       show(sub, { kind: 'waiting' })
@@ -289,8 +309,13 @@ export const createPRDetailRecoveryActions = (
         return
       }
       // Retry owns the status line from here, including over a retained terminal outcome.
-      consumed.set(contextKey, { kind: 'closed' })
-      set({ prDetailRecovery: { contextKey, status: { kind: 'closed' }, terminalCount: 0 } })
+      record(contextKey, { kind: 'closed' }, 0)
+    },
+
+    settleGitHubPRDetailRetry: (contextKey, status) => {
+      if (!current && get().prDetailRecovery?.contextKey === contextKey) {
+        record(contextKey, status, 1)
+      }
     }
   }
 }

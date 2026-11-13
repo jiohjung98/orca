@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useAppStore } from '@/store'
 import { isGitHubPRSuppressed } from '../../../../../../shared/worktree/github-pr-suppression'
 import {
+  prDetailRecoveryContextKey,
   prDetailRecoverySelectionRevision,
   type PRDetailRecoveryContext
 } from '@/store/github/pull-requests/pr-detail-recovery-context'
@@ -55,7 +56,9 @@ function recoveryContext(model: Model): PRDetailRecoveryContext | null {
 }
 
 /** The visible Checks panel asks the store for one automatic detail read per context and exposure. */
-export function useChecksPanelPRDetailRecovery(model: Model): void {
+export function useChecksPanelPRDetailRecovery(model: Model): {
+  prDetailRecoveryContextKey: string | null
+} {
   const notePanelVisible = useAppStore((s) => s.notePRDetailRecoveryPanelVisible)
   const reconcile = useAppStore((s) => s.reconcileGitHubPRDetails)
   useEffect(() => {
@@ -103,4 +106,5 @@ export function useChecksPanelPRDetailRecovery(model: Model): void {
     selectionRevision,
     reconcile
   ])
+  return { prDetailRecoveryContextKey: context ? prDetailRecoveryContextKey(context) : null }
 }

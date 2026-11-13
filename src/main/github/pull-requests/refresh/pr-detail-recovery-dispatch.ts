@@ -13,7 +13,7 @@ import {
 } from './pr-refresh-request-registry'
 import type { PRRefreshRetryState } from './pr-refresh-retry-state'
 import type { PRDetailRecoveryTickets } from './pr-detail-recovery-tickets'
-import type { PRDetailRecoveryTicket } from './pr-detail-recovery-ticket-model'
+import { admitTicket, type PRDetailRecoveryTicket } from './pr-detail-recovery-ticket-model'
 import {
   blockedWslDistroForPath,
   wslDistroForPath
@@ -121,11 +121,7 @@ export async function runPRDetailRecoveryEntry(
   const requestStartedAt = Date.now()
   deps.queue.noteRequestStarted(ticket.slotKey, requestSequence)
   deps.pacing.noteActiveStart(entry)
-  deps.tickets.admit(
-    ticket,
-    requestSequence,
-    requestStartedAt + PR_DETAIL_RECOVERY_SETTLE_BUDGET_MS
-  )
+  admitTicket(ticket, requestSequence, requestStartedAt + PR_DETAIL_RECOVERY_SETTLE_BUDGET_MS)
   deps.schedule()
   if (absorbedAliases.length > 0) {
     deps.events.broadcast(

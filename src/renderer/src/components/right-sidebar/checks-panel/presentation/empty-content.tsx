@@ -86,6 +86,8 @@ export function ChecksPanelEmptyContent({
     prGenerateError,
     prGenerating,
     cachedPRNumber,
+    prCacheKey,
+    prDetailRecoveryContextKey,
     prRepoDefaultBaseRef,
     prStackedCreationSupported,
     prTitle,
@@ -189,6 +191,7 @@ export function ChecksPanelEmptyContent({
         providerName: hostedReviewCreateCopy.providerName,
         isGitHubProvider: hostedReviewCreateProvider === 'github',
         reviewLookup: checksPanelReviewLookup,
+        reviewNumber: checksPanelReviewLookupResult.reviewNumber ?? null,
         openReviewUrl: checksPanelReviewLookupResult.openReviewUrl,
         eligibilityBlockedReason: hostedReviewCreation?.blockedReason,
         // Preserved-composer mode uses confirmed readiness rather than the live create gate.
@@ -214,6 +217,7 @@ export function ChecksPanelEmptyContent({
           manualRetryInFlight={emptyRefreshing}
           actionsDisabled={isPublishingBranch || isRemoteOperationActive}
           worktreeId={activeWorktreeId}
+          recoveryKeys={{ prCacheKey, contextKey: prDetailRecoveryContextKey }}
           onRetry={handleRefresh}
           setRetrying={setEmptyRefreshing}
         />
@@ -364,7 +368,9 @@ export function ChecksPanelEmptyContent({
                   })
                 }
               >
-                {t('auto.components.right.sidebar.ChecksPanel.review.open_review', 'Open Review')}
+                {t('checksPanel.positiveReview.open', 'Open {{shortLabel}}', {
+                  shortLabel: emptyReviewCopy.shortLabel
+                })}
               </Button>
             ) : null}
             {reviewShowRetryOrRefresh ? (

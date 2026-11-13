@@ -139,3 +139,24 @@ export function waitForTicketChange(
     ticket.waiters.add(done)
   })
 }
+
+/** Retire a preparation and its unused grant; a later preparation issues fresh ones. */
+export function retireTicketGrant(ticket: PRDetailRecoveryTicket): void {
+  ticket.preparation = undefined
+  ticket.committedToken = undefined
+  ticket.publicationGrantId = undefined
+}
+
+/** The read crossed every gate and starts now; the settlement budget runs from here. */
+export function admitTicket(
+  ticket: PRDetailRecoveryTicket,
+  requestSequence: number,
+  settleDeadline: number
+): void {
+  ticket.phase = 'admitted'
+  ticket.admitted = true
+  ticket.requestSequence = requestSequence
+  ticket.requestStartedAt = Date.now()
+  ticket.settleDeadline = settleDeadline
+  bumpTicket(ticket)
+}

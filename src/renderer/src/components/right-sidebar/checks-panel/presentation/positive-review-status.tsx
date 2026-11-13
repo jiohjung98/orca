@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import { DetachedHeadBadge } from '@/components/DetachedHeadBadge'
@@ -12,7 +12,14 @@ import {
   getPositiveReviewPresentation,
   type PositiveReviewPresentation
 } from './checks-panel-positive-review-status'
-import { requestReviewHeaderFocusAfterRetry } from './positive-review-focus-handoff'
+import {
+  cancelReviewHeaderFocusAfterRetry,
+  requestReviewHeaderFocusAfterRetry
+} from './positive-review-focus-handoff'
+import type { PRDetailRecoveryStatus } from '@/store/github/pull-requests/pr-detail-recovery-context'
+
+// Matches the ticket settlement budget: a Retry that outlasts it reports that GitHub didn't respond.
+const RETRY_BUDGET_MS = 30_000
 
 // Defer visible loading so fast local reads stay quiet while SSH still gets feedback.
 const SPINNER_DELAY_MS = 200
@@ -46,6 +53,11 @@ export function ChecksPanelPositiveReviewStatus({
 }): React.JSX.Element {
   const t = useTranslate()
   const showSpinner = useDelayedFlag(presentation.spinner)
+  const spokenKey = `${presentation.statusKind}:${announcement}`
+  const [spoken, setSpoken] = useState({ key: spokenKey, text: presentation.statusText })
+  if (spoken.key !== spokenKey) {
+    setSpoken({ key: spokenKey, text: presentation.statusText })
+  }
   const retryBlocked = presentation.retryBlocked || actionsDisabled
   return (
     <>
@@ -56,7 +68,11 @@ export function ChecksPanelPositiveReviewStatus({
         className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground"
       >
         {showSpinner ? <LoadingSpinner className="size-3 shrink-0" /> : null}
-        <span key={announcement}>{presentation.statusText}</span>
+        {/* Visible text may tick (gate times); assistive tech hears each state once. */}
+        <span aria-hidden="true">{presentation.statusText}</span>
+        <span key={announcement} className="sr-only">
+          {spoken.text}
+        </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         {presentation.open ? (
@@ -105,9 +121,11 @@ export function ChecksPanelPositiveReview({
   manualRetryInFlight,
   actionsDisabled,
   worktreeId,
+  recoveryKeys: { prCacheKey, contextKey: recoveryContextKey },
   manualRefreshFailed,
   onRetry,
-  setRetrying
+  setRetrying,
+  retryBudgetMs = RETRY_BUDGET_MS
 }: {
   detachedHeadDisplay: React.ComponentProps<typeof DetachedHeadBadge>['display'] | null
   reviewShortLabel: string
@@ -118,14 +136,31 @@ export function ChecksPanelPositiveReview({
   manualRetryInFlight: boolean
   actionsDisabled: boolean
   worktreeId: string | null
+  /** This render's alias and recovery context; store state for another context is ignored. */
+  recoveryKeys: { prCacheKey: string; contextKey: string | null }
   manualRefreshFailed: boolean
   onRetry: () => Promise<unknown>
   setRetrying: (retrying: boolean) => void
+  retryBudgetMs?: number
 }): React.JSX.Element {
   const t = useTranslate()
   const intlLocale = useIntlLocale()
-  const recovery = useAppStore((s) => s.prDetailRecovery)
+  const storedRecovery = useAppStore((s) => s.prDetailRecovery)
+  const recovery =
+    storedRecovery && storedRecovery.contextKey === recoveryContextKey ? storedRecovery : null
   const cancelRecovery = useAppStore((s) => s.cancelGitHubPRDetailRecovery)
+  const settleRetry = useAppStore((s) => s.settleGitHubPRDetailRetry)
+  const blockRef = useRef<HTMLDivElement>(null)
+  const retryRun = useRef(0)
+  // Automatic success unmounts this block; keep focus that was inside it by handing it to the header.
+  useLayoutEffect(() => {
+    const block = blockRef.current
+    return () => {
+      if (block?.contains(document.activeElement)) {
+        requestReviewHeaderFocusAfterRetry(worktreeId)
+      }
+    }
+  }, [worktreeId])
   const now = useNow(
     1000,
     recovery?.status.kind === 'paused' ||
@@ -148,7 +183,7 @@ export function ChecksPanelPositiveReview({
     t
   )
   return (
-    <div className="px-4 py-6">
+    <div ref={blockRef} className="px-4 py-6">
       {detachedHeadDisplay && (
         <div className="mb-3">
           <DetachedHeadBadge display={detachedHeadDisplay} side="bottom" />
@@ -168,7 +203,34 @@ export function ChecksPanelPositiveReview({
           cancelRecovery()
           requestReviewHeaderFocusAfterRetry(worktreeId)
           setRetrying(true)
-          void onRetry().finally(() => setRetrying(false))
+          const run = ++retryRun.current
+          const contextKey = recoveryContextKey
+          // Still mounted after the read means no details appeared: report this Retry's own outcome.
+          const report = (status: PRDetailRecoveryStatus): void => {
+            cancelReviewHeaderFocusAfterRetry()
+            setRetrying(false)
+            if (contextKey) {
+              settleRetry(contextKey, status)
+            }
+          }
+          const budget = window.setTimeout(() => {
+            if (run === retryRun.current) {
+              report({ kind: 'timeout' })
+            }
+          }, retryBudgetMs)
+          void onRetry().finally(() => {
+            window.clearTimeout(budget)
+            if (run !== retryRun.current || !blockRef.current) {
+              return
+            }
+            retryRun.current += 1
+            const state = useAppStore.getState().prRefreshStates[prCacheKey]
+            report(
+              state?.status === 'error'
+                ? { kind: 'failed', errorType: state.errorType }
+                : { kind: 'unusable' }
+            )
+          })
         }}
       />
     </div>

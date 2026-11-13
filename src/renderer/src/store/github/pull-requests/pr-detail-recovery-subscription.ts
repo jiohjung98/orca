@@ -1,8 +1,12 @@
 import type {
   PRDetailRecoveryIdentity,
+  PRDetailRecoverySnapshot,
   PRDetailRecoveryTerminal
 } from '../../../../../shared/github/pull-requests/refresh/pr-detail-recovery-contract'
 import type { Repo } from '../../../../../shared/repo-types'
+import type { AppState } from '../../types'
+import { getRuntimeRepoTarget } from '../repositories/repository-routing'
+import { getGitHubSourceTarget } from '../work-items/work-item-routing'
 import type {
   PRDetailRecoveryContext,
   PRDetailRecoveryOwner,
@@ -21,6 +25,10 @@ export type PRDetailRecoverySubscription = {
   ticketId: string | null
   grant: PRDetailRecoveryGrant | null
   intentRevision: number
+  /** The host started the read; newer local intent then only revokes publication. */
+  admitted: boolean
+  /** Close without a grant: the owning store's own detach and status update. */
+  yieldToNewerIntent: () => void
 }
 
 const LOCAL_WAIT_BUDGET_MS = 30_000
@@ -84,4 +92,63 @@ export function terminalRecoveryStatus(
     case 'not-admitted':
       return { kind: 'failed' }
   }
+}
+
+const START_RESUME_DELAYS_MS = [1_000, 3_000]
+
+/**
+ * Sends a start, then resends the identical epoch after a lost reply while the context is still
+ * current. The host returns the ticket it already accepted, so a resend never adds a read. Bounded
+ * well inside the ticket lease; afterwards the panel shows an actionable failure.
+ */
+export async function startWithResume(
+  start: () => Promise<PRDetailRecoverySnapshot>,
+  stillCurrent: () => boolean
+): Promise<PRDetailRecoverySnapshot | null> {
+  const first = await start().catch(() => null)
+  if (first) {
+    return first
+  }
+  for (const delayMs of START_RESUME_DELAYS_MS) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    if (!stillCurrent()) {
+      return null
+    }
+    const resumed = await start().catch(() => null)
+    if (resumed) {
+      return resumed
+    }
+  }
+  return null
+}
+
+const MAX_RETAINED_EPOCHS = 32
+const retained = new Map<string, PRDetailRecoveryStatus>()
+
+/** Epochs closed in this exposure; rendering the same context again shows them instead of re-arming. */
+export const retainedEpochs = {
+  get: (contextKey: string) => retained.get(contextKey),
+  set: (contextKey: string, status: PRDetailRecoveryStatus): void => {
+    retained.delete(contextKey)
+    retained.set(contextKey, status)
+    for (const oldest of retained.keys()) {
+      if (retained.size <= MAX_RETAINED_EPOCHS) {
+        break
+      }
+      retained.delete(oldest)
+    }
+  },
+  clear: (): void => retained.clear()
+}
+
+/** The paired runtime that owns this context's repo, or null for this app's own host. */
+export function recoveryRuntimeTarget(
+  state: AppState,
+  sub: PRDetailRecoverySubscription
+): ReturnType<typeof getRuntimeRepoTarget> {
+  return getRuntimeRepoTarget(
+    state,
+    { repoId: sub.context.repoId, repoPath: sub.context.repoPath },
+    getGitHubSourceTarget(state, sub.owner.repo)
+  )
 }

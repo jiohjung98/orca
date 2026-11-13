@@ -55,6 +55,8 @@ export type ChecksPanelReviewStateInput = {
   /** GitHub gets typed error rows; other providers use neutral copy. */
   isGitHubProvider: boolean
   reviewLookup: ChecksPanelReviewLookup
+  /** The positive review's number, when the evidence names one. */
+  reviewNumber?: number | null
   openReviewUrl: string | null
   eligibilityBlockedReason: HostedReviewCreationBlockedReason | undefined
   /** Confirmed readiness held for the exact context (see review-creation). */

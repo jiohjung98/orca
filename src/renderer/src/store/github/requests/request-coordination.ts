@@ -54,20 +54,37 @@ export const inflightCommentsRequests = new Map<string, InflightComments>()
 export const inflightWorkItemsRequests = new Map<string, InflightWorkItems>()
 export const inflightProjectViewRequests = new Map<string, InflightProjectView>()
 export const prRequestGenerations = new Map<string, number>()
-// Bumped by each new direct PR lookup; a pending detail-recovery grant yields to newer intent.
-const prLookupIntentRevisions = new Map<string, number>()
+// Each new direct PR lookup takes a never-reused token; a pending detail-recovery grant yields to it.
+const prLookupIntentTokens = new Map<string, number>()
+let prLookupIntentSequence = 0
+// Eviction raises this floor, so a forgotten key still reads newer than any token captured before it.
+let prLookupIntentEvictedFloor = 0
+const prLookupIntentListeners = new Set<(cacheKey: string) => void>()
 
 export function notePRLookupIntent(cacheKey: string): void {
-  prLookupIntentRevisions.delete(cacheKey)
-  prLookupIntentRevisions.set(cacheKey, (prLookupIntentRevisions.get(cacheKey) ?? 0) + 1)
-  const oldest = prLookupIntentRevisions.keys().next().value
-  if (prLookupIntentRevisions.size > 1_000 && oldest !== undefined) {
-    prLookupIntentRevisions.delete(oldest)
+  prLookupIntentSequence += 1
+  prLookupIntentTokens.delete(cacheKey)
+  prLookupIntentTokens.set(cacheKey, prLookupIntentSequence)
+  for (const [oldestKey, oldestToken] of prLookupIntentTokens) {
+    if (prLookupIntentTokens.size <= 1_000) {
+      break
+    }
+    prLookupIntentTokens.delete(oldestKey)
+    prLookupIntentEvictedFloor = Math.max(prLookupIntentEvictedFloor, oldestToken)
+  }
+  for (const listener of prLookupIntentListeners) {
+    listener(cacheKey)
   }
 }
 
+/** Strictly increases whenever new direct intent for the alias exists, including across eviction. */
 export function prLookupIntentRevision(cacheKey: string): number {
-  return prLookupIntentRevisions.get(cacheKey) ?? 0
+  return prLookupIntentTokens.get(cacheKey) ?? prLookupIntentEvictedFloor
+}
+
+export function onPRLookupIntent(listener: (cacheKey: string) => void): () => void {
+  prLookupIntentListeners.add(listener)
+  return () => prLookupIntentListeners.delete(listener)
 }
 export const prRefreshStartedHostedReviewEntries = new Map<
   string,

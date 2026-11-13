@@ -21,7 +21,12 @@ import {
 import type { PRRefreshRetryState } from './pr-refresh-retry-state'
 import { expirePRDetailRecoveryTickets } from './pr-detail-recovery-expiry'
 import {
+  isAdmissibleEpochScope,
+  PRDetailRecoveryEpochWatermarks
+} from './pr-detail-recovery-epoch-watermarks'
+import {
   bumpTicket,
+  retireTicketGrant,
   recoveryQueueEntry,
   recoveryQueueKey,
   waitForTicketChange,
@@ -42,7 +47,7 @@ type Deps = {
 export class PRDetailRecoveryTickets {
   private readonly tickets = new Map<string, PRDetailRecoveryTicket>()
   private readonly byEpoch = new Map<string, string>()
-  private readonly watermarks = new Map<string, number>()
+  private readonly watermarks = new PRDetailRecoveryEpochWatermarks()
   private acceptSequence = 0
   private prepareSequence = 0
 
@@ -67,19 +72,26 @@ export class PRDetailRecoveryTickets {
       this.renew(existing)
       return snapshotTicket(existing)
     }
-    if (args.clientEpoch.counter <= (this.watermarks.get(epochKey) ?? -1)) {
+    if (this.watermarks.isStale(epochKey, args.clientEpoch.counter)) {
       return refusedSnapshot(args.identity, { kind: 'expired' })
     }
-    this.watermarks.set(epochKey, args.clientEpoch.counter)
+    // Refusals allocate nothing; only an accepted epoch records a watermark.
+    if (typeof resolved === 'string' || !isAdmissibleEpochScope(args.clientEpoch.scope)) {
+      return refusedSnapshot(args.identity, {
+        kind: 'not-admitted',
+        reason: typeof resolved === 'string' ? resolved : 'validation'
+      })
+    }
+    if (
+      this.tickets.size >= PR_DETAIL_RECOVERY_MAX_TICKETS ||
+      !this.watermarks.canAccept(caller.callerKey, epochKey)
+    ) {
+      return refusedSnapshot(args.identity, { kind: 'not-admitted', reason: 'capacity' })
+    }
     if (existing && !existing.terminal) {
       this.close(existing, { kind: 'cancelled' })
     }
-    if (typeof resolved === 'string') {
-      return refusedSnapshot(args.identity, { kind: 'not-admitted', reason: resolved })
-    }
-    if (this.tickets.size >= PR_DETAIL_RECOVERY_MAX_TICKETS) {
-      return refusedSnapshot(args.identity, { kind: 'not-admitted', reason: 'capacity' })
-    }
+    this.watermarks.accept(caller.callerKey, epochKey, args.clientEpoch.counter)
     this.acceptSequence += 1
     const ticket = createPRDetailRecoveryTicket(this.deps.queue, this.deps.requests, {
       caller,
@@ -123,6 +135,8 @@ export class PRDetailRecoveryTickets {
     ticket.notBefore = dueAt > now ? dueAt : undefined
     this.deps.queue.set(key, recoveryQueueEntry(ticket, dueAt, false))
     bumpTicket(ticket)
+    // Settlement observed off the drainer (direct or hosted reads) must still wake it; future gates keep their dueAt.
+    this.deps.scheduleDrain()
   }
 
   /** Queue or read settlement: wake predecessor waiters and close orphaned queued tickets. */
@@ -162,6 +176,7 @@ export class PRDetailRecoveryTickets {
   prepare(ticket: PRDetailRecoveryTicket): void {
     this.deps.queue.delete(recoveryQueueKey(ticket.ticketId))
     this.prepareSequence += 1
+    retireTicketGrant(ticket)
     ticket.phase = 'preparing'
     ticket.notBefore = undefined
     ticket.preparation = {
@@ -169,8 +184,6 @@ export class PRDetailRecoveryTickets {
       expiresAt: Date.now() + PR_DETAIL_RECOVERY_PREPARE_TTL_MS,
       prepareSequence: this.prepareSequence
     }
-    ticket.committedToken = undefined
-    ticket.publicationGrantId = undefined
     bumpTicket(ticket)
     this.deps.scheduleDrain()
   }
@@ -187,9 +200,7 @@ export class PRDetailRecoveryTickets {
     }
     ticket.phase = 'paused'
     ticket.notBefore = until
-    ticket.preparation = undefined
-    ticket.committedToken = undefined
-    ticket.publicationGrantId = undefined
+    retireTicketGrant(ticket)
     bumpTicket(ticket)
     this.deps.scheduleDrain()
   }
@@ -224,15 +235,6 @@ export class PRDetailRecoveryTickets {
     return snapshotTicket(ticket)
   }
 
-  admit(ticket: PRDetailRecoveryTicket, requestSequence: number, settleDeadline: number): void {
-    ticket.phase = 'admitted'
-    ticket.admitted = true
-    ticket.requestSequence = requestSequence
-    ticket.requestStartedAt = Date.now()
-    ticket.settleDeadline = settleDeadline
-    bumpTicket(ticket)
-  }
-
   close(ticket: PRDetailRecoveryTicket, terminal: PRDetailRecoveryTerminal): void {
     if (ticket.terminal) {
       return
@@ -257,12 +259,27 @@ export class PRDetailRecoveryTickets {
     return snapshotTicket(ticket)
   }
 
+  /** The caller is gone for good (window closed or reloaded): nothing it owned can be observed or replayed. */
   cancelCaller(callerKey: string): void {
-    for (const ticket of this.tickets.values()) {
+    for (const ticket of Array.from(this.tickets.values())) {
       if (ticket.caller.callerKey === callerKey) {
         this.close(ticket, { kind: 'cancelled' })
+        this.forget(ticket)
       }
     }
+    this.watermarks.forgetCaller(callerKey)
+  }
+
+  private forget(ticket: PRDetailRecoveryTicket): void {
+    this.tickets.delete(ticket.ticketId)
+    if (this.byEpoch.get(ticket.epochKey) === ticket.ticketId) {
+      this.byEpoch.delete(ticket.epochKey)
+      this.watermarks.release(ticket.epochKey)
+    }
+  }
+
+  retainedCounts(): { tickets: number; watermarks: number } {
+    return { tickets: this.tickets.size, watermarks: this.watermarks.size }
   }
 
   /** Bounded observation; it never enqueues, admits or reads. */
@@ -281,23 +298,18 @@ export class PRDetailRecoveryTickets {
       return snapshotTicket(ticket)
     }
     await waitForTicketChange(ticket, signal)
-    if (!ticket.terminal) {
-      this.renew(ticket)
-    }
+    this.renew(ticket)
     return snapshotTicket(ticket)
   }
 
   /** Expire leases, preparations, settlement budgets and retention; returns the next deadline. */
   tick(now = Date.now()): number | null {
-    return expirePRDetailRecoveryTickets(this.tickets.values(), now, this.deps.queue, {
+    const next = expirePRDetailRecoveryTickets(this.tickets.values(), now, this.deps.queue, {
       close: (ticket, terminal) => this.close(ticket, terminal),
-      forget: (ticket) => {
-        this.tickets.delete(ticket.ticketId)
-        if (this.byEpoch.get(ticket.epochKey) === ticket.ticketId) {
-          this.byEpoch.delete(ticket.epochKey)
-        }
-      }
+      forget: (ticket) => this.forget(ticket)
     })
+    const reclaim = this.watermarks.reclaim(now)
+    return next === null ? reclaim : reclaim === null ? next : Math.min(next, reclaim)
   }
 
   private owned(callerKey: string, ticketId: string): PRDetailRecoveryTicket | undefined {

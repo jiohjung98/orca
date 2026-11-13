@@ -3,44 +3,69 @@ import {
   type ComponentFixture
 } from '../../../../component-fixtures/component-fixture'
 import type { PRDetailRecoveryStatus } from '@/store/github/pull-requests/pr-detail-recovery-context'
+import { useState } from 'react'
+import type { ChecksPanelRefreshInput } from '../checks-panel-review-state-model'
 import { ChecksPanelPositiveReview } from './positive-review-status'
 
-const noop = (): void => {}
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 400))
+
+type RowOptions = {
+  reviewNumber?: number | null
+  openReviewUrl?: string | null
+  refresh?: ChecksPanelRefreshInput
+  onRetry?: () => Promise<unknown>
+  retryBudgetMs?: number
+}
+
+function Harness({ options }: { options: RowOptions }): React.JSX.Element {
+  const [retrying, setRetrying] = useState(false)
+  return (
+    <div className="bg-sidebar">
+      <ChecksPanelPositiveReview
+        detachedHeadDisplay={null}
+        reviewShortLabel="PR"
+        providerName="GitHub"
+        reviewNumber={options.reviewNumber === undefined ? 7 : options.reviewNumber}
+        openReviewUrl={
+          options.openReviewUrl === undefined
+            ? 'https://github.com/acme/widgets/pull/7'
+            : options.openReviewUrl
+        }
+        refresh={options.refresh}
+        manualRefreshFailed={false}
+        manualRetryInFlight={retrying}
+        actionsDisabled={false}
+        worktreeId="fixture"
+        recoveryKeys={{ prCacheKey: 'fixture-pr', contextKey: 'fixture' }}
+        onRetry={options.onRetry ?? (() => Promise.resolve())}
+        setRetrying={setRetrying}
+        retryBudgetMs={options.retryBudgetMs}
+      />
+    </div>
+  )
+}
 
 function row(
   status: PRDetailRecoveryStatus,
   width: number,
-  options: { reviewNumber?: number | null; openReviewUrl?: string | null } = {}
+  options: RowOptions = {}
 ): ComponentFixture {
   return {
     width,
     store: { prDetailRecovery: { contextKey: 'fixture', status, terminalCount: 1 } },
     // The admitted row shows its spinner only after the loading delay.
     interact: settle,
-    render: () => (
-      <div className="bg-sidebar">
-        <ChecksPanelPositiveReview
-          detachedHeadDisplay={null}
-          reviewShortLabel="PR"
-          providerName="GitHub"
-          reviewNumber={options.reviewNumber === undefined ? 7 : options.reviewNumber}
-          openReviewUrl={
-            options.openReviewUrl === undefined
-              ? 'https://github.com/acme/widgets/pull/7'
-              : options.openReviewUrl
-          }
-          refresh={undefined}
-          manualRefreshFailed={false}
-          manualRetryInFlight={false}
-          actionsDisabled={false}
-          worktreeId="fixture"
-          onRetry={() => Promise.resolve()}
-          setRetrying={noop}
-        />
-      </div>
-    )
+    render: () => <Harness options={options} />
   }
+}
+
+async function clickRetry(frame: HTMLElement): Promise<void> {
+  await settle()
+  const retry = Array.from(frame.querySelectorAll('button')).find(
+    (button) => button.textContent === 'Retry'
+  )
+  retry?.click()
+  await settle()
 }
 
 // Rate-gate deadline in a stable local wall time so screenshots stay comparable.
@@ -93,4 +118,23 @@ export const keyboardRetryFocusAdmitted = defineFixture({
     retry?.focus()
     retry?.click()
   }
+})
+
+/** Unusable, then Retry reads again and finds nothing usable: same text, announced again. */
+export const unusableRetryUnusable = defineFixture({
+  ...row(ROWS.unusable, 320, {
+    onRetry: () => new Promise((resolve) => setTimeout(resolve, 100))
+  }),
+  interact: clickRetry
+})
+
+/** Timeout, then a Retry that outlasts its budget reports GitHub didn't respond again. */
+export const timeoutRetryTimeout = defineFixture({
+  ...row(ROWS.timeout, 320, { onRetry: () => new Promise(() => {}), retryBudgetMs: 150 }),
+  interact: clickRetry
+})
+
+/** A manual rate gate with no scheduled load: Retry at, not Loads at. */
+export const retryOnlyRateGate = row(ROWS.unusable, 320, {
+  refresh: { status: 'error', errorType: 'rate_limited', retryDisabledUntil: gate.getTime() }
 })

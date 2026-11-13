@@ -8,6 +8,7 @@ import { HARD_ERROR_COPY } from './checks-panel-review-copy'
 export type PositiveReviewStatusKind =
   | 'queued'
   | 'rate-gate'
+  | 'retry-gate'
   | 'admitted'
   | 'failed'
   | 'timeout'
@@ -45,11 +46,22 @@ type StatusChoice = {
   errorType?: PRRefreshErrorType
 }
 
-function rateGateUntil(refresh: ChecksPanelRefreshInput | undefined, now: number): number | null {
-  const until =
-    refresh?.retryDisabledUntil ??
-    (refresh?.status === 'paused' ? refresh.nextAutoRetryAt : undefined)
-  return until !== undefined && until > now ? until : null
+function future(at: number | undefined, now: number): number | null {
+  return at !== undefined && at > now ? at : null
+}
+
+/** "Loads at" only when a load is actually scheduled; a bare manual gate says "Retry at". */
+function gateChoice(input: PositiveReviewStatusInput): StatusChoice | null {
+  const { refresh, recovery, now } = input
+  const rateLimited = refresh?.status === 'paused' || refresh?.errorType === 'rate_limited'
+  const loadsAt =
+    (recovery?.kind === 'paused' ? future(recovery.notBefore, now) : null) ??
+    (rateLimited ? future(refresh?.nextAutoRetryAt, now) : null)
+  if (loadsAt !== null) {
+    return { kind: 'rate-gate', until: loadsAt }
+  }
+  const retryAt = future(refresh?.retryDisabledUntil, now)
+  return retryAt !== null ? { kind: 'retry-gate', until: retryAt } : null
 }
 
 function ordinaryStatus(refresh: ChecksPanelRefreshInput | undefined): StatusChoice | null {
@@ -69,16 +81,14 @@ function chooseStatus(input: PositiveReviewStatusInput): StatusChoice {
   if (input.manualRetryInFlight) {
     return { kind: 'admitted' }
   }
-  const gate = rateGateUntil(input.refresh, input.now)
+  const gate = gateChoice(input)
   if (gate !== null) {
-    return { kind: 'rate-gate', until: gate }
+    return gate
   }
   const recovery = input.recovery
   switch (recovery?.kind) {
     case 'paused':
-      return recovery.notBefore > input.now
-        ? { kind: 'rate-gate', until: recovery.notBefore }
-        : { kind: 'queued' }
+      return { kind: 'queued' }
     case 'waiting':
       return { kind: 'queued' }
     case 'admitted':
@@ -145,6 +155,12 @@ export function getPositiveReviewPresentation(
           time: input.formatTime(choice.until ?? input.now)
         }
       ),
+    'retry-gate': () =>
+      t(
+        'checksPanel.positiveReview.status.retryGate',
+        '{{provider}} limit reached. Retry at {{time}}.',
+        { provider, time: input.formatTime(choice.until ?? input.now) }
+      ),
     admitted: () => t('checksPanel.positiveReview.status.loading', 'Loading details…'),
     failed: () => failedText(input, choice.errorType, t),
     timeout: () =>
@@ -187,7 +203,8 @@ export function getPositiveReviewPresentation(
                 )
         }
       : null,
-    retryBlocked: choice.kind === 'admitted' || choice.kind === 'rate-gate',
+    retryBlocked:
+      choice.kind === 'admitted' || choice.kind === 'rate-gate' || choice.kind === 'retry-gate',
     spinner: choice.kind === 'admitted'
   }
 }

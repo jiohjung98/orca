@@ -38,8 +38,11 @@ export default function ChecksPanel(): React.JSX.Element {
     useChecksPanelEntryRefreshAndTitleActions(refreshModel)
   )
   // After entry refresh registers its own read, so recovery waits for it instead of racing it.
-  useChecksPanelPRDetailRecovery(entryModel)
-  const resolutionModel = Object.assign(entryModel, useChecksPanelCommentResolution(entryModel))
+  const recoveryModel = Object.assign(entryModel, useChecksPanelPRDetailRecovery(entryModel))
+  const resolutionModel = Object.assign(
+    recoveryModel,
+    useChecksPanelCommentResolution(recoveryModel)
+  )
   const mutationModel = Object.assign(
     resolutionModel,
     useChecksPanelCommentMutations(resolutionModel)

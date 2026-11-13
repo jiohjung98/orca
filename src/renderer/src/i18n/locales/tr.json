@@ -13500,7 +13500,6 @@
             "495b2f8c4b": "Ajan başlatıldı, ancak seçilen yorumlar çözülemedi veya yanıtlanamadı.",
             "review": {
               "auto_retry": "Orca {{time}} saatinde tekrar deneyecek.",
-              "open_review": "İncelemeyi Aç",
               "retry": "Tekrar Dene"
             },
             "sync": {
@@ -21187,6 +21186,25 @@
       "title": "Pull request bağlantısı kaldırıldı",
       "description": "PR #{{number}} bu çalışma alanı için gizlendi. Kontrolleri ve inceleme ayrıntılarını geri getirmek için tekrar bağlayın.",
       "relink": "PR #{{number}} bağlantısını kur"
+    },
+    "positiveReview": {
+      "status": {
+        "failed": "Ayrıntılar yüklenemedi",
+        "queued": "Ayrıntıların yüklenmesi bekleniyor",
+        "rateGate": "{{provider}} sınırına ulaşıldı. {{time}} saatinde yüklenecek.",
+        "loading": "Ayrıntılar yükleniyor…",
+        "timeout": "{{provider}} yanıt vermedi",
+        "unusable": "Ayrıntılar burada gösterilemiyor",
+        "notLoaded": "Ayrıntılar yüklenmedi",
+        "retryGate": "{{provider}} sınırına ulaşıldı. {{time}} saatinde yeniden deneyin."
+      },
+      "title": "{{shortLabel}} #{{number}}",
+      "titleNoNumber": "{{shortLabel}} bulundu",
+      "open": "{{shortLabel}} aç",
+      "openAria": "{{shortLabel}} #{{number}} öğesini {{provider}} üzerinde aç",
+      "openAriaNoNumber": "{{shortLabel}} öğesini {{provider}} üzerinde aç",
+      "pushToUpdate": "{{shortLabel}} #{{number}} öğesini güncellemek için push yapın.",
+      "pushToUpdateNoNumber": "Bu {{shortLabel}} öğesini güncellemek için push yapın."
     }
   },
   "sourceControl": {

@@ -73,17 +73,27 @@ describe('getPositiveReviewPresentation', () => {
     expect(presentation.open).toBeNull()
   })
 
-  it('blocks Retry until a host rate gate passes, then shows the outcome', () => {
-    const gated = input({
-      recovery: { kind: 'failed' },
+  it('says Loads at only for a scheduled load and Retry at for a bare manual gate', () => {
+    const manualGate = input({
+      recovery: { kind: 'unusable' },
       refresh: { status: 'error', errorType: 'rate_limited', retryDisabledUntil: NOW + 5_000 }
     })
-    expect(getPositiveReviewPresentation(gated).statusText).toBe(
-      'GitHub limit reached. Loads at T+5s.'
+    expect(getPositiveReviewPresentation(manualGate).statusText).toBe(
+      'GitHub limit reached. Retry at T+5s.'
     )
-    expect(getPositiveReviewPresentation(gated).retryBlocked).toBe(true)
-    expect(getPositiveReviewPresentation({ ...gated, now: NOW + 5_000 }).statusText).toBe(
-      "Couldn't load details"
+    expect(getPositiveReviewPresentation(manualGate).retryBlocked).toBe(true)
+    expect(getPositiveReviewPresentation({ ...manualGate, now: NOW + 5_000 }).statusText).toBe(
+      "Details can't be shown here"
+    )
+    const scheduled = input({
+      refresh: {
+        status: 'paused',
+        nextAutoRetryAt: NOW + 9_000,
+        retryDisabledUntil: NOW + 9_000
+      }
+    })
+    expect(getPositiveReviewPresentation(scheduled).statusText).toBe(
+      'GitHub limit reached. Loads at T+9s.'
     )
   })
 
