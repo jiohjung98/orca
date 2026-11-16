@@ -196,6 +196,7 @@ function prepareQuickOpenFile(path: string, inputIndex: number): QuickOpenIndexe
   if (/[A-Z]/.test(searchPath)) {
     const boundaries = new Set<number>()
     let lowerOffset = 0
+    const composes = NON_ASCII.test(searchPath)
     for (let index = 0; index < searchPath.length; index++) {
       if (
         index > 0 &&
@@ -203,7 +204,9 @@ function prepareQuickOpenFile(path: string, inputIndex: number): QuickOpenIndexe
         (/[a-z0-9]/.test(searchPath[index - 1]) ||
           (/[A-Z]/.test(searchPath[index - 1]) && /[a-z]/.test(searchPath[index + 1] ?? '')))
       ) {
-        boundaries.add(lowerOffset)
+        // Why: composing the lowercased path can shorten it, so per-character lengths drift for non-ASCII names.
+        const head = composes ? searchPath.slice(0, index).toLowerCase().normalize('NFC') : null
+        boundaries.add(head?.length ?? lowerOffset)
       }
       lowerOffset += searchPath[index].toLowerCase().length
     }
